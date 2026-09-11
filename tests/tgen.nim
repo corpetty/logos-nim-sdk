@@ -95,3 +95,92 @@ suite "lidl-gen: naming":
     check clientTypeName("counter_module") == "CounterClient"
     check clientTypeName("delivery_module") == "DeliveryClient"
     check clientTypeName("multi_word_module") == "MultiWordClient"
+
+# A contract mixing reads (pruned), an action with a @brief, and a module-native
+# (Tier-1) action — the shape the driver manifest derives from.
+let voteContract = %*{
+  "name": "vote_module",
+  "methods": [
+    {"name": "version", "params": [], "returnType": {"name": "tstr"}},
+    {"name": "getTally", "params": [], "returnType": {"name": "int"}},
+    {"name": "cast",
+     "params": [{"name": "proposalId", "type": {"name": "tstr"}},
+                {"name": "choice", "type": {"name": "uint"}}],
+     "returnType": {"name": "bool"},
+     "description": "Cast your vote on a proposal."},
+    {"name": "settle",
+     "params": [{"name": "proposalId", "type": {"name": "tstr"}}],
+     "returnType": {"name": "bool"},
+     "description": "Finalize a proposal on-chain (module-native signing)."}
+  ]
+}
+
+suite "lidl-gen: driver — selection":
+  test "isReadName prunes queries, keeps actions":
+    check isReadName("version")
+    check isReadName("getTally")
+    check isReadName("listItems")
+    check not isReadName("cast")
+    check not isReadName("settle")
+
+  test "invokeDomain is byte-exact with muster's tag (invariant 5)":
+    check invokeDomain("vote_module", "cast") == "muster.invoke.vote_module.cast.v1"
+
+  test "no curation → heuristic keeps only the non-reads":
+    let chosen = coordinatableMethods(voteContract, @[])
+    var names: seq[string]
+    for m in chosen: names.add m["name"].getStr()
+    check names == @["cast", "settle"]
+
+  test "explicit curation is the EXACT set (never a silent guess)":
+    let chosen = coordinatableMethods(voteContract, @["cast"])
+    check chosen.len == 1
+    check chosen[0]["name"].getStr() == "cast"
+
+suite "lidl-gen: driver — manifest":
+  let d = genDriver(voteContract, @["cast", "settle"], @["settle"])
+
+  test "generated, non-editable, names the module const":
+    check "GENERATED driver manifest for vote_module" in d
+    check "const VoteActionsJson* = " in d
+    check "let VoteActions* = parseJson(VoteActionsJson)" in d
+
+  test "each action carries its dCBOR domain tag":
+    check "muster.invoke.vote_module.cast.v1" in d
+    check "muster.invoke.vote_module.settle.v1" in d
+
+  test "the effect schema names the typed args (for canonicalize + card)":
+    check "\"proposalId\"" in d
+    check "\"choice\"" in d
+
+  test "the card label comes from the LIDL description (@brief)":
+    check "Cast your vote on a proposal." in d
+
+  test "tier + curated flags are explicit":
+    check "\"tier\": 0" in d      # cast — generic invoke
+    check "\"tier\": 1" in d      # settle — module-native
+    check "\"curated\": true" in d
+
+  test "a Tier-1 action emits a driver skeleton to complete":
+    check "TIER-1 DRIVER SKELETON — vote_module.settle" in d
+    check "type voteSettleDriver* = ref object of Driver" in d
+    check "method canonicalize*(d: voteSettleDriver" in d
+    check "method verifyContribution*(d: voteSettleDriver" in d
+    check "implement against the module's" in d
+
+  test "a Tier-0 action emits NO skeleton (config only)":
+    check "TIER-1 DRIVER SKELETON — vote_module.cast" notin d
+
+  test "the manifest is a compilable const (block-comment skeletons don't break it)":
+    # the skeleton is a Nim block comment #[ ... ]# so the file still parses
+    check "#[" in d and "]#" in d
+
+suite "lidl-gen: driver — card fallback":
+  test "no @brief → label falls back to module.method (no fabricated copy)":
+    let noBrief = %*{"name": "bank_module",
+      "methods": [{"name": "transfer",
+        "params": [{"name": "to", "type": {"name": "tstr"}}],
+        "returnType": {"name": "bool"}}]}
+    let d = genDriver(noBrief, @["transfer"])
+    check "\"label\": \"bank_module.transfer\"" in d
+    check "\"brief\": \"\"" in d
