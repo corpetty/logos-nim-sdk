@@ -5,14 +5,25 @@
 ## Usage:
 ##   lidl_gen provider <contract.lidl> <out.nim>            # the module's surface
 ##   lidl_gen client   <contract.lidl> <out.nim> [target]   # a typed consumer client
+##   lidl_gen driver   <contract.lidl> <out.nim> [coordinatable-csv] [tier1-csv]
+##       # a Muster driver manifest (P-D5): effect schema + domain tag + card copy per
+##       # coordinatable action, + Tier-1 skeletons. `coordinatable-csv` curates which
+##       # methods are actions (omit → the read-pruning heuristic); `tier1-csv` names
+##       # the module-native ones needing a hand-written driver.
 ##
 ## Build needs the LIDL C bridge headers/archives, passed via -d:
 ##   nim c -d:LIDL_INC=<dir> -d:LIDL_C_A=<liblidl_c.a> -d:LIDL_A=<liblidl.a> \
 ##         lidl-gen/lidl_gen.nim
 ## (mirrors module/tools/lidl_gen.nim's build in this repo.)
 
-import std/[json, os]
+import std/[json, os, strutils]
 import "./gen"
+
+proc csv(s: string): seq[string] =
+  ## Split a comma-separated CLI arg into a trimmed, non-empty list.
+  for part in s.split(','):
+    let t = part.strip()
+    if t.len > 0: result.add t
 
 const LIDL_INC {.strdefine.} = ""
 const LIDL_C_A {.strdefine.} = ""
@@ -44,7 +55,11 @@ when isMainModule:
   of "client":
     let target = (if paramCount() >= 4: paramStr(4) else: "")
     writeFile(outFile, genClient(contract, target))
+  of "driver":
+    let coordinatable = (if paramCount() >= 4: csv(paramStr(4)) else: @[])
+    let tier1 = (if paramCount() >= 5: csv(paramStr(5)) else: @[])
+    writeFile(outFile, genDriver(contract, coordinatable, tier1))
   else:
-    quit("unknown mode: " & mode & " (want provider|client)", 1)
+    quit("unknown mode: " & mode & " (want provider|client|driver)", 1)
   echo "generated ", outFile, " (", mode, ") from ", paramStr(2),
        " — ", contract{"methods"}.len, " methods"
