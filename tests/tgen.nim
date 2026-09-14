@@ -149,6 +149,11 @@ suite "lidl-gen: driver — manifest":
     check "muster.invoke.vote_module.cast.v1" in d
     check "muster.invoke.vote_module.settle.v1" in d
 
+  test "each action carries a Basecamp capability name, separate from the schema id":
+    # namespace.verb routing key (module.method), distinct from the signed-bytes domain
+    check "\"capability\": \"vote_module.cast\"" in d
+    check "\"capability\": \"vote_module.settle\"" in d
+
   test "the effect schema names the typed args (for canonicalize + card)":
     check "\"proposalId\"" in d
     check "\"choice\"" in d

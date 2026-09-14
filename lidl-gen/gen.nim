@@ -339,6 +339,12 @@ proc actionEntry(m: JsonNode, module: string, curated, tier1: bool): JsonNode =
     # How this method was selected: curated IN by the caller, or a heuristic guess
     # (a candidate a human should confirm) — never a silent "it's an action".
     "curated": curated,
+    # The Basecamp app-to-app CAPABILITY name (namespace.verb, lowercase — the routing
+    # key an app would `logos.request`), kept SEPARATE from `domain` (the signed-bytes
+    # schema id, invariant 5). They have two lifecycles: the capability name stays stable
+    # while the schema id migrates to a cdCDDLe root when that ratifies — so a muster is
+    # addressable both as a Basecamp capability and as a CDDL-typed effect.
+    "capability": module & "." & name,
     "domain": invokeDomain(module, name),
     # the effect the room proposes; muster's invoke driver canonicalizes exactly this.
     "effect": %*{"module": module, "method": name, "argSchema": argSchema(m{"params"})},
