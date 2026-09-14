@@ -61,6 +61,10 @@ this emits, per curated action:
 - the **effect schema** (`{module, method, argSchema}`) and its dCBOR **domain tag**
   `muster.invoke.<module>.<method>.v1` — byte-exact with muster's invoke driver, so a
   manifest-derived effect and muster's runtime effect canonicalize identically (inv 5),
+- a **capability name** (`<module>.<method>`) — the Basecamp app-to-app routing key
+  (`namespace.verb`), kept **separate** from the domain tag: the capability name is
+  stable while the schema id migrates to a cdCDDLe root when that ratifies, so an action
+  is addressable both as a Basecamp capability and as a CDDL-typed effect,
 - the **intent-propose card** copy — the LIDL `description` (the `@brief`) becomes the
   action label, each param names a field (LIDL params carry no description, so the
   field label is the param name — honest, not a fabricated sentence),
