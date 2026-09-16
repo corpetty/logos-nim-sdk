@@ -189,3 +189,74 @@ suite "lidl-gen: driver — card fallback":
     let d = genDriver(noBrief, @["transfer"])
     check "\"label\": \"bank_module.transfer\"" in d
     check "\"brief\": \"\"" in d
+
+# ── the declared half of the manifest (muster exo-002, M6) ─────────────────────
+let voteDecls = %*{
+  "cast": {
+    "requirements": [{"kind": "environment", "name": "chain:31337"},
+                     {"kind": "authority", "name": "voter", "scope": "contributor"}],
+    "discloses": [{"field": "choice", "to": "chain-observer"}],
+    "touches": [{"target": "vote:tally", "mode": "write"}]
+  }
+}
+
+suite "lidl-gen: driver — declarations":
+  test "an action with no declaration is emitted declared:false, with only the derived rows":
+    let m = actionManifest("vote_module", "settle", tier1 = true, decl = nil)
+    check m["declared"].getBool() == false
+    check m["requirements"].len == 1 and m["requirements"][0]["name"].getStr() == "vote_module"
+    check m["discloses"].len == 0      # Tier-1: the module does not see invoke args
+    let t0 = actionManifest("vote_module", "cast", tier1 = false, decl = nil)
+    check t0["discloses"].len == 1 and t0["discloses"][0]["to"].getStr() == "target-module"
+
+  test "a declaration is validated, normalized (scope defaults to instance), and merged after the derived rows":
+    let m = actionManifest("vote_module", "cast", tier1 = false, decl = voteDecls["cast"])
+    check m["declared"].getBool()
+    check m["requirements"][0]["kind"].getStr() == "module"          # derived first
+    check m["requirements"][1]["scope"].getStr() == "instance"       # defaulted
+    check m["requirements"][2]["scope"].getStr() == "contributor"
+    check m["discloses"][0]["to"].getStr() == "target-module"        # derived first
+    check m["discloses"][1]["field"].getStr() == "choice"
+    check m["touches"][0]["mode"].getStr() == "write"
+
+  test "a value outside the closed vocabulary RAISES — never a silent manifest":
+    expect DeclarationError:
+      discard validateDeclaration("cast", %*{"discloses": [{"field": "x", "to": "the-internet"}]})
+    expect DeclarationError:
+      discard validateDeclaration("cast", %*{"requirements": [{"kind": "vibes", "name": "x"}]})
+    expect DeclarationError:
+      discard validateDeclaration("cast", %*{"touches": [{"target": "x", "mode": "maybe"}]})
+    expect DeclarationError:
+      discard validateDeclaration("cast", %*{"requirements": [{"kind": "infra"}]})   # no name
+    expect DeclarationError:
+      discard validateDeclaration("cast", %*{"needs": []})                          # unknown key
+    expect DeclarationError:
+      discard genDriver(voteContract, @["cast"], @[], %*{"getTally": {}})           # not an action
+
+  test "the manifest rides each action entry in the generated const":
+    let d = genDriver(voteContract, @["cast", "settle"], @["settle"], voteDecls)
+    check "\"declared\": true" in d      # cast
+    check "\"declared\": false" in d     # settle (no declaration)
+    check "\"to\": \"chain-observer\"" in d
+    check "\"target\": \"vote:tally\"" in d
+
+  test "a Tier-1 skeleton carries a manifest override rendered as the driver seam's Nim":
+    let decls = %*{"settle": {"requirements": [{"kind": "environment", "name": "chain:1"},
+                                                {"kind": "authority", "name": "owner", "scope": "contributor"}],
+                              "discloses": [{"field": "proposalId", "to": "chain-observer"}],
+                              "touches": [{"target": "chain:1", "mode": "write"}]}}
+    let d = genDriver(voteContract, @["cast", "settle"], @["settle"], decls)
+    check "method manifest*(d: voteSettleDriver, effect: Effect): ActionManifest =" in d
+    check "ActionManifest(declared: true, agreement: d.describe()," in d
+    check "req(rqEnvironment, \"chain:1\", rsInstance)" in d
+    check "req(rqAuthority, \"owner\", rsContributor)" in d
+    check "row(\"proposalId\", obChainObserver)" in d
+    check "touch(\"chain:1\", tmWrite)" in d
+    # undeclared Tier-1 → an explicit declared:false override with a TODO, never a guess
+    let u = genDriver(voteContract, @["cast", "settle"], @["settle"])
+    check "ActionManifest(declared: false, agreement: d.describe())" in u
+    check "no declaration for this action" in u
+
+  test "determinism: the same inputs yield byte-identical output":
+    check genDriver(voteContract, @["cast", "settle"], @["settle"], voteDecls) ==
+          genDriver(voteContract, @["cast", "settle"], @["settle"], voteDecls)
