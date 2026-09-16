@@ -328,7 +328,124 @@ proc cardDescriptor(m: JsonNode, module, name: string): JsonNode =
     "brief": brief,
     "fields": fields}
 
-proc actionEntry(m: JsonNode, module: string, curated, tier1: bool): JsonNode =
+# ── the action manifest's declared half (muster epic exo-002, M6) ─────────────
+# LIDL says what an action IS (its typed args) but not what it NEEDS, TOUCHES, or
+# DISCLOSES — so those are declared, never guessed, in a declarations file keyed by
+# method name, and validated against the closed vocabulary muster's
+# drivers/manifest.nim + intents/disclosure.nim define. A value outside it raises:
+# a declaration that lies about its vocabulary must not become a manifest silently.
+# An action with no declaration is emitted `declared: false` — shown as such by the
+# card, never filled in.
+
+const
+  RequirementKinds* = ["module", "environment", "authority", "infra", "capability"]
+  RequirementScopes* = ["instance", "contributor"]
+  Observers* = ["room-member", "store-node", "rpc-provider", "chain-observer", "target-module"]
+  TouchModes* = ["read", "write"]
+
+type DeclarationError* = object of CatchableError
+
+proc declFail(name, msg: string) =
+  raise newException(DeclarationError, "declaration for " & name & ": " & msg)
+
+proc validateDeclaration*(name: string, d: JsonNode): JsonNode =
+  ## Normalize + validate one action's declaration:
+  ##   {requirements: [{kind, name, scope?}], discloses: [{field, to}], touches: [{target, mode}]}
+  if d.kind != JObject: declFail(name, "must be an object")
+  for k in d.keys:
+    if k notin ["requirements", "discloses", "touches"]: declFail(name, "unknown key '" & k & "'")
+  var reqs = newJArray()
+  var disc = newJArray()
+  var touches = newJArray()
+  if d.hasKey("requirements"):
+    if d["requirements"].kind != JArray: declFail(name, "requirements must be an array")
+    for r in d["requirements"]:
+      let kind = r{"kind"}.getStr()
+      if kind notin RequirementKinds: declFail(name, "requirement kind '" & kind & "' is not one of " & $RequirementKinds)
+      if r{"name"}.getStr().len == 0: declFail(name, "a requirement needs a name")
+      let scope = r{"scope"}.getStr("instance")
+      if scope notin RequirementScopes: declFail(name, "requirement scope '" & scope & "' is not one of " & $RequirementScopes)
+      reqs.add %*{"kind": kind, "name": r["name"].getStr(), "scope": scope}
+  if d.hasKey("discloses"):
+    if d["discloses"].kind != JArray: declFail(name, "discloses must be an array")
+    for x in d["discloses"]:
+      if x{"field"}.getStr().len == 0: declFail(name, "a disclosure needs a field")
+      let to = x{"to"}.getStr()
+      if to notin Observers: declFail(name, "observer '" & to & "' is not one of " & $Observers)
+      disc.add %*{"field": x["field"].getStr(), "to": to}
+  if d.hasKey("touches"):
+    if d["touches"].kind != JArray: declFail(name, "touches must be an array")
+    for t in d["touches"]:
+      if t{"target"}.getStr().len == 0: declFail(name, "a touch needs a target")
+      let mode = t{"mode"}.getStr()
+      if mode notin TouchModes: declFail(name, "touch mode '" & mode & "' is not one of " & $TouchModes)
+      touches.add %*{"target": t["target"].getStr(), "mode": mode}
+  %*{"requirements": reqs, "discloses": disc, "touches": touches}
+
+proc actionManifest*(module, name: string, tier1: bool, decl: JsonNode): JsonNode =
+  ## The manifest entry: {declared, requirements, discloses, touches}. Two rows are
+  ## DERIVED from the contract, always: the target module must be loaded (a module
+  ## requirement) and, for a Tier-0 action, the module sees the args when the core
+  ## invokes it (a target-module disclosure). Everything else comes from the
+  ## declaration; with none, the entry is honestly `declared: false`.
+  var reqs = newJArray()
+  reqs.add %*{"kind": "module", "name": module, "scope": "instance"}
+  var disc = newJArray()
+  if not tier1: disc.add %*{"field": "args", "to": "target-module"}
+  var touches = newJArray()
+  if decl.isNil:
+    return %*{"declared": false, "requirements": reqs, "discloses": disc, "touches": touches}
+  let v = validateDeclaration(name, decl)
+  for r in v["requirements"]: reqs.add r
+  for x in v["discloses"]: disc.add x
+  for t in v["touches"]: touches.add t
+  %*{"declared": true, "requirements": reqs, "discloses": disc, "touches": touches}
+
+proc nimIdent(table: openArray[(string, string)], key: string): string =
+  for (k, v) in table:
+    if k == key: return v
+  key
+
+const
+  KindIdents = [("module", "rqModule"), ("environment", "rqEnvironment"), ("authority", "rqAuthority"),
+                ("infra", "rqInfra"), ("capability", "rqCapability")]
+  ScopeIdents = [("instance", "rsInstance"), ("contributor", "rsContributor")]
+  ObserverIdents = [("room-member", "obRoomMember"), ("store-node", "obStoreNode"),
+                    ("rpc-provider", "obRpcProvider"), ("chain-observer", "obChainObserver"),
+                    ("target-module", "obTargetModule")]
+  ModeIdents = [("read", "tmRead"), ("write", "tmWrite")]
+
+proc manifestSkeleton*(stem: string, manifest: JsonNode): string =
+  ## The `manifest` override for a Tier-1 skeleton, with the declared rows rendered as
+  ## the Nim the driver seam takes (drivers/manifest.nim: req / row / touch) — so a
+  ## hand-written driver starts DECLARED and conformance's consistency check
+  ## (external finality ⇒ environment + chain-observer + write; named ⇒ contributor
+  ## authority) has something to grade. Undeclared stays undeclared, flagged.
+  if not manifest["declared"].getBool():
+    return "method manifest*(d: " & stem & "Driver, effect: Effect): ActionManifest =\n" &
+      "  # TODO: no declaration for this action — add one (requirements / discloses /\n" &
+      "  # touches) to the declarations file and regenerate. Undeclared is SHOWN on the\n" &
+      "  # card, never guessed.\n" &
+      "  ActionManifest(declared: false, agreement: d.describe())\n\n"
+  var reqs, rows, touches: seq[string]
+  for r in manifest["requirements"]:
+    reqs.add "req(" & nimIdent(KindIdents, r["kind"].getStr()) & ", \"" & r["name"].getStr() & "\", " &
+             nimIdent(ScopeIdents, r["scope"].getStr()) & ")"
+  for x in manifest["discloses"]:
+    rows.add "row(\"" & x["field"].getStr() & "\", " & nimIdent(ObserverIdents, x["to"].getStr()) & ")"
+  for t in manifest["touches"]:
+    touches.add "touch(\"" & t["target"].getStr() & "\", " & nimIdent(ModeIdents, t["mode"].getStr()) & ")"
+  "method manifest*(d: " & stem & "Driver, effect: Effect): ActionManifest =\n" &
+    "  # From the declarations file — regenerate rather than edit. Conformance checks\n" &
+    "  # this against describe() (external finality ⇒ environment + chain-observer +\n" &
+    "  # a write touch; named membership ⇒ a contributor-scoped authority).\n" &
+    "  ActionManifest(declared: true, agreement: d.describe(),\n" &
+    "    requirements: @[" & reqs.join(", ") & "],\n" &
+    "    discloses: @[" & rows.join(", ") & "],\n" &
+    "    touches: @[" & touches.join(", ") & "])\n\n"
+
+proc actionEntry(m: JsonNode, module: string, curated, tier1: bool,
+                 manifest: JsonNode): JsonNode =
   let name = m["name"].getStr()
   result = %*{
     "module": module,
@@ -348,9 +465,12 @@ proc actionEntry(m: JsonNode, module: string, curated, tier1: bool): JsonNode =
     "domain": invokeDomain(module, name),
     # the effect the room proposes; muster's invoke driver canonicalizes exactly this.
     "effect": %*{"module": module, "method": name, "argSchema": argSchema(m{"params"})},
-    "card": cardDescriptor(m, module, name)}
+    "card": cardDescriptor(m, module, name),
+    # what it NEEDS, TOUCHES, and DISCLOSES — declared (never guessed) + two derived
+    # rows; the card's "what is needed / what will it touch / what will happen".
+    "manifest": manifest}
 
-proc driverSkeleton(module, name: string): string =
+proc driverSkeleton(module, name: string, manifest: JsonNode): string =
   ## A Tier-1 `Driver` skeleton for a module-native action — emitted as a Nim block
   ## comment so the manifest still compiles. The mechanical shape is filled; the two
   ## procs that depend on the module's own signed form are flagged to implement, with
@@ -375,7 +495,8 @@ proc driverSkeleton(module, name: string): string =
     "method verifyContribution*(d: " & stem & "Driver, c: Contribution, round: int): bool =\n" &
     "  # TODO: verify a contribution under the module's auth model (e.g. recover a\n" &
     "  # signer and check membership), the way safe.nim recovers an owner.\n" &
-    "  raise newException(Defect, \"" & stem & "Driver.verifyContribution: implement against the module's auth model\")\n" &
+    "  raise newException(Defect, \"" & stem & "Driver.verifyContribution: implement against the module's auth model\")\n\n" &
+    manifestSkeleton(stem, manifest) &
     "]#\n"
 
 proc coordinatableMethods*(contract: JsonNode, coordinatable: seq[string]): seq[JsonNode] =
@@ -391,21 +512,33 @@ proc coordinatableMethods*(contract: JsonNode, coordinatable: seq[string]): seq[
       result.add m
 
 proc genDriver*(contract: JsonNode, coordinatable: seq[string] = @[],
-                tier1: seq[string] = @[]): string =
+                tier1: seq[string] = @[], declarations: JsonNode = nil): string =
   ## A Muster driver manifest for `contract`. `coordinatable` curates which methods
   ## are actions (empty → the read-pruning heuristic, entries marked uncurated).
   ## `tier1` names the module-native actions (a hand-written driver + skeleton);
   ## everything else is Tier 0 (the generic invoke driver, config only).
+  ## `declarations` (an object keyed by method name) says what each action needs,
+  ## touches, and discloses — validated; a key naming a non-action raises.
   let module = contractName(contract)
   let stem = moduleStem(module)
   let chosen = coordinatableMethods(contract, coordinatable)
+  var chosenNames: seq[string]
+  for m in chosen: chosenNames.add m["name"].getStr()
+  if not declarations.isNil:
+    if declarations.kind != JObject:
+      raise newException(DeclarationError, "declarations must be an object keyed by method name")
+    for k in declarations.keys:
+      if k notin chosenNames:
+        raise newException(DeclarationError, "declaration for '" & k & "' names a method that is not a coordinatable action")
   var entries = newJArray()
   var skels: string
   for m in chosen:
     let name = m["name"].getStr()
     let isT1 = name in tier1
-    entries.add actionEntry(m, module, curated = (coordinatable.len > 0), tier1 = isT1)
-    if isT1: skels.add driverSkeleton(module, name)
+    let decl = (if declarations.isNil or not declarations.hasKey(name): nil else: declarations[name])
+    let manifest = actionManifest(module, name, isT1, decl)
+    entries.add actionEntry(m, module, curated = (coordinatable.len > 0), tier1 = isT1, manifest = manifest)
+    if isT1: skels.add driverSkeleton(module, name, manifest)
   let stemCap = stem[0].toUpperAscii() & stem[1..^1]
   # Emit the manifest as a compile-time JSON-string const (embeddable, diffable) plus
   # a parsed node consumers read. A JsonNode is a ref, so it can't be a `const` — the
@@ -413,7 +546,9 @@ proc genDriver*(contract: JsonNode, coordinatable: seq[string] = @[],
   result = "## GENERATED driver manifest for " & module &
            " by logos_sdk lidl-gen — do not edit.\n" &
            "## Per coordinatable action: the effect schema, its dCBOR domain tag\n" &
-           "## (invariant 5), and the intent-propose card copy. Tier-0 actions register\n" &
+           "## (invariant 5), the intent-propose card copy, and its manifest — what it\n" &
+           "## needs / touches / discloses (declared, never guessed; `declared: false`\n" &
+           "## when no declaration was given). Tier-0 actions register\n" &
            "## muster's generic `invoke` driver from this config; Tier-1 actions need a\n" &
            "## hand-written driver (skeletons appended as block comments).\n" &
            "import std/json\n\n" &
