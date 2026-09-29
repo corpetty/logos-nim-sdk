@@ -69,7 +69,10 @@ this emits, per curated action:
   action label, each param names a field (LIDL params carry no description, so the
   field label is the param name — honest, not a fabricated sentence),
 - the action's **manifest** — what it *needs* (requirements: module / environment /
-  authority / infra / capability, each `instance`- or `contributor`-scoped), what it
+  authority / infra / capability / address / asset, each supplied by a `party`:
+  `instance`, `proposer`, `contributor`, `payer` or `counterparty`, as muster's
+  `drivers/manifest.nim` names them — address / asset may name the effect `field` the
+  material lands in; the legacy `scope` key is still read), what it
   *touches* (targets read or written), and what it *discloses* (which fields reach
   which observer class: the room, the store node, the RPC provider, anyone reading the
   chain, the module it calls) — the proposal card's "what is needed / what will it
