@@ -346,8 +346,14 @@ proc cardDescriptor(m: JsonNode, module, name: string): JsonNode =
 # card, never filled in.
 
 const
-  RequirementKinds* = ["module", "environment", "authority", "infra", "capability"]
-  RequirementScopes* = ["instance", "contributor"]
+  RequirementKinds* = ["module", "environment", "authority", "infra", "capability", "address", "asset"]
+  RequirementParties* = ["instance", "proposer", "contributor", "payer", "counterparty"]
+    ## WHO supplies a requirement — muster's RequirementParty (drivers/manifest.nim,
+    ## docs/design/material-and-disclosure.md §3.2): this client; bound into the effect at
+    ## compose; each contributor's own holding; each party who settles their OWN part (a
+    ## split's debtors); a specific other party. It was `scope` (instance | contributor)
+    ## before muster's exo-45e.2; a declaration may still say `scope`, read as `party`.
+  RequirementScopes* {.deprecated: "use RequirementParties".} = RequirementParties
   Observers* = ["room-member", "store-node", "rpc-provider", "chain-observer", "target-module"]
   TouchModes* = ["read", "write"]
 
@@ -358,7 +364,12 @@ proc declFail(name, msg: string) =
 
 proc validateDeclaration*(name: string, d: JsonNode): JsonNode =
   ## Normalize + validate one action's declaration:
-  ##   {requirements: [{kind, name, scope?}], discloses: [{field, to}], touches: [{target, mode}]}
+  ##   {requirements: [{kind, name, party?, field?, target?}], discloses: [{field, to}],
+  ##    touches: [{target, mode}]}
+  ## `party` defaults to instance; the legacy key `scope` is read as `party` (the two must
+  ## agree when both are given). `field` names the effect field the material lands in (an
+  ## address or asset a proposer / counterparty / payer supplies); `target` narrows it
+  ## (a chain, an asset) and defaults to the requirement's name.
   if d.kind != JObject: declFail(name, "must be an object")
   for k in d.keys:
     if k notin ["requirements", "discloses", "touches"]: declFail(name, "unknown key '" & k & "'")
@@ -371,9 +382,17 @@ proc validateDeclaration*(name: string, d: JsonNode): JsonNode =
       let kind = r{"kind"}.getStr()
       if kind notin RequirementKinds: declFail(name, "requirement kind '" & kind & "' is not one of " & $RequirementKinds)
       if r{"name"}.getStr().len == 0: declFail(name, "a requirement needs a name")
-      let scope = r{"scope"}.getStr("instance")
-      if scope notin RequirementScopes: declFail(name, "requirement scope '" & scope & "' is not one of " & $RequirementScopes)
-      reqs.add %*{"kind": kind, "name": r["name"].getStr(), "scope": scope}
+      let legacy = r{"scope"}.getStr("")
+      let party = r{"party"}.getStr(if legacy.len > 0: legacy else: "instance")
+      if legacy.len > 0 and legacy != party:
+        declFail(name, "requirement party '" & party & "' and scope '" & legacy & "' disagree")
+      if party notin RequirementParties:
+        declFail(name, "requirement party '" & party & "' is not one of " & $RequirementParties)
+      var req = %*{"kind": kind, "name": r["name"].getStr(), "party": party}
+      if r{"field"}.getStr().len > 0:
+        req["field"] = %r["field"].getStr()
+        req["target"] = %r{"target"}.getStr(r["name"].getStr())
+      reqs.add req
   if d.hasKey("discloses"):
     if d["discloses"].kind != JArray: declFail(name, "discloses must be an array")
     for x in d["discloses"]:
@@ -397,7 +416,7 @@ proc actionManifest*(module, name: string, tier1: bool, decl: JsonNode): JsonNod
   ## invokes it (a target-module disclosure). Everything else comes from the
   ## declaration; with none, the entry is honestly `declared: false`.
   var reqs = newJArray()
-  reqs.add %*{"kind": "module", "name": module, "scope": "instance"}
+  reqs.add %*{"kind": "module", "name": module, "party": "instance"}
   var disc = newJArray()
   if not tier1: disc.add %*{"field": "args", "to": "target-module"}
   var touches = newJArray()
@@ -416,8 +435,14 @@ proc nimIdent(table: openArray[(string, string)], key: string): string =
 
 const
   KindIdents = [("module", "rqModule"), ("environment", "rqEnvironment"), ("authority", "rqAuthority"),
-                ("infra", "rqInfra"), ("capability", "rqCapability")]
-  ScopeIdents = [("instance", "rsInstance"), ("contributor", "rsContributor")]
+                ("infra", "rqInfra"), ("capability", "rqCapability"), ("address", "rqAddress"),
+                ("asset", "rqAsset")]
+  PartyIdents = [("instance", "rpInstance"), ("proposer", "rpProposer"), ("contributor", "rpContributor"),
+                 ("payer", "rpPayer"), ("counterparty", "rpCounterparty")]
+  ClassIdents = [("authority", "mcAuthority"), ("address", "mcAddress"), ("asset", "mcAsset"),
+                 ("infra", "mcInfra"), ("environment", "mcInfra"), ("module", "mcCapability"),
+                 ("capability", "mcCapability")]
+    ## a requirement kind → the material class that satisfies it (muster classForKind)
   ObserverIdents = [("room-member", "obRoomMember"), ("store-node", "obStoreNode"),
                     ("rpc-provider", "obRpcProvider"), ("chain-observer", "obChainObserver"),
                     ("target-module", "obTargetModule")]
@@ -437,8 +462,13 @@ proc manifestSkeleton*(stem: string, manifest: JsonNode): string =
       "  ActionManifest(declared: false, agreement: d.describe())\n\n"
   var reqs, rows, touches: seq[string]
   for r in manifest["requirements"]:
-    reqs.add "req(" & nimIdent(KindIdents, r["kind"].getStr()) & ", \"" & r["name"].getStr() & "\", " &
-             nimIdent(ScopeIdents, r["scope"].getStr()) & ")"
+    var one = "req(" & nimIdent(KindIdents, r["kind"].getStr()) & ", \"" & r["name"].getStr() & "\", " &
+              nimIdent(PartyIdents, r["party"].getStr())
+    if r.hasKey("field"):
+      # material that lands in an effect field: need(class, target, field)
+      one.add ", need(" & nimIdent(ClassIdents, r["kind"].getStr()) & ", \"" & r["target"].getStr() &
+              "\", \"" & r["field"].getStr() & "\")"
+    reqs.add one & ")"
   for x in manifest["discloses"]:
     rows.add "row(\"" & x["field"].getStr() & "\", " & nimIdent(ObserverIdents, x["to"].getStr()) & ")"
   for t in manifest["touches"]:
@@ -446,7 +476,7 @@ proc manifestSkeleton*(stem: string, manifest: JsonNode): string =
   "method manifest*(d: " & stem & "Driver, effect: Effect): ActionManifest =\n" &
     "  # From the declarations file — regenerate rather than edit. Conformance checks\n" &
     "  # this against describe() (external finality ⇒ environment + chain-observer +\n" &
-    "  # a write touch; named membership ⇒ a contributor-scoped authority).\n" &
+    "  # a write touch; named membership ⇒ a contributor authority).\n" &
     "  ActionManifest(declared: true, agreement: d.describe(),\n" &
     "    requirements: @[" & reqs.join(", ") & "],\n" &
     "    discloses: @[" & rows.join(", ") & "],\n" &
