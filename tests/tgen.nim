@@ -209,15 +209,34 @@ suite "lidl-gen: driver — declarations":
     let t0 = actionManifest("vote_module", "cast", tier1 = false, decl = nil)
     check t0["discloses"].len == 1 and t0["discloses"][0]["to"].getStr() == "target-module"
 
-  test "a declaration is validated, normalized (scope defaults to instance), and merged after the derived rows":
+  test "a declaration is validated, normalized (party defaults to instance), and merged after the derived rows":
     let m = actionManifest("vote_module", "cast", tier1 = false, decl = voteDecls["cast"])
     check m["declared"].getBool()
     check m["requirements"][0]["kind"].getStr() == "module"          # derived first
-    check m["requirements"][1]["scope"].getStr() == "instance"       # defaulted
-    check m["requirements"][2]["scope"].getStr() == "contributor"
+    check m["requirements"][0]["party"].getStr() == "instance"
+    check m["requirements"][1]["party"].getStr() == "instance"       # defaulted
+    check m["requirements"][2]["party"].getStr() == "contributor"    # the legacy `scope` key, read as party
+    check not m["requirements"][2].hasKey("scope")
     check m["discloses"][0]["to"].getStr() == "target-module"        # derived first
     check m["discloses"][1]["field"].getStr() == "choice"
     check m["touches"][0]["mode"].getStr() == "write"
+
+  test "muster's party vocabulary: proposer, payer and counterparty; address and asset with an effect field":
+    let v = validateDeclaration("split", %*{"requirements": [
+      {"kind": "authority", "name": "split-party", "party": "contributor"},
+      {"kind": "asset", "name": "share", "party": "payer", "field": "shares", "target": "eip155:1/ETH"},
+      {"kind": "address", "name": "pay-to", "party": "proposer", "field": "payTo"},
+      {"kind": "address", "name": "payee", "party": "counterparty"}]})
+    let rs = v["requirements"]
+    check rs[1]["party"].getStr() == "payer" and rs[1]["field"].getStr() == "shares"
+    check rs[1]["target"].getStr() == "eip155:1/ETH"
+    check rs[2]["party"].getStr() == "proposer" and rs[2]["target"].getStr() == "pay-to"   # target defaults to the name
+    check rs[3]["party"].getStr() == "counterparty" and not rs[3].hasKey("field")
+    expect DeclarationError:   # a party outside the vocabulary
+      discard validateDeclaration("x", %*{"requirements": [{"kind": "asset", "name": "a", "party": "everyone"}]})
+    expect DeclarationError:   # scope and party disagree
+      discard validateDeclaration("x", %*{"requirements": [{"kind": "authority", "name": "a",
+                                                            "scope": "instance", "party": "contributor"}]})
 
   test "a value outside the closed vocabulary RAISES — never a silent manifest":
     expect DeclarationError:
@@ -248,11 +267,15 @@ suite "lidl-gen: driver — declarations":
     let d = genDriver(voteContract, @["cast", "settle"], @["settle"], decls)
     check "method manifest*(d: voteSettleDriver, effect: Effect): ActionManifest =" in d
     check "ActionManifest(declared: true, agreement: d.describe()," in d
-    check "req(rqEnvironment, \"chain:1\", rsInstance)" in d
-    check "req(rqAuthority, \"owner\", rsContributor)" in d
+    check "req(rqEnvironment, \"chain:1\", rpInstance)" in d
+    check "req(rqAuthority, \"owner\", rpContributor)" in d
     check "row(\"proposalId\", obChainObserver)" in d
     check "touch(\"chain:1\", tmWrite)" in d
     # undeclared Tier-1 → an explicit declared:false override with a TODO, never a guess
+    # material that lands in an effect field renders the need(class, target, field) muster takes
+    let pd = genDriver(voteContract, @["cast", "settle"], @["settle"],
+      %*{"settle": {"requirements": [{"kind": "asset", "name": "share", "party": "payer", "field": "shares"}]}})
+    check "req(rqAsset, \"share\", rpPayer, need(mcAsset, \"share\", \"shares\"))" in pd
     let u = genDriver(voteContract, @["cast", "settle"], @["settle"])
     check "ActionManifest(declared: false, agreement: d.describe())" in u
     check "no declaration for this action" in u
