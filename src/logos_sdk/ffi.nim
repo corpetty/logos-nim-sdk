@@ -9,10 +9,15 @@
 ## separate modules (see `bytes.nim`) so those stay unit-testable.
 
 type
-  LpClient* {.importc: "struct LpClient", incompleteStruct.} = object
-    ## Opaque client handle (`lp_client*`).
-  LpSubscription* {.importc: "struct LpSubscription", incompleteStruct.} = object
-    ## Opaque subscription handle (`lp_subscription*`).
+  LpClient* = object
+    ## Opaque client handle (`lp_client*`). A plain Nim object, never
+    ## `importc: "struct LpClient"`: with no file-scope declaration of that struct,
+    ## each C prototype naming it declares its own struct scoped to the prototype,
+    ## and gcc 14 rejects passing one where another is expected. A Nim type is
+    ## emitted once per C file and is the same type everywhere; the ABI is only a
+    ## pointer, and C links by name, not by struct type.
+  LpSubscription* = object
+    ## Opaque subscription handle (`lp_subscription*`), as LpClient.
 
   LpResultCb* = proc (ok: cint, json: cstring, userData: pointer) {.cdecl, gcsafe.}
     ## Result callback for `lp_invoke_async`: `ok != 0` → `json` is the result
@@ -56,6 +61,14 @@ proc lp_invoke_async*(client: ptr LpClient, meth, argsJson: cstring, timeoutMs: 
   ## Asynchronous twin. The ABI copies `argsJson` before returning, so the caller
   ## need not keep it alive; the typed result lands on `cb` later.
 
+proc lp_token_get*(moduleName: cstring): cstring {.importc, cdecl.}
+  ## The stored token for `moduleName`, or nil. Free with `lp_string_free`.
+proc lp_inform_module_token*(client: ptr LpClient, authToken, moduleName, token: cstring): cint
+  {.importc, cdecl.}
+  ## The consumer side of token registration: a host, holding `authToken` for the
+  ## client's target (e.g. capability_module), registers `token` for `moduleName`.
+  ## LP_OK when the target accepted it. A module receives its token (lp_token_save);
+  ## a host registers one, which is how a Nim app hosts a view (muster exo-607 T4a).
 proc lp_token_save*(moduleName, token: cstring): cint {.importc, cdecl.}
   ## Save a host-issued auth token into THIS plugin's protocol stack, so
   ## subsequent calls to `moduleName` authenticate. The consumer half of the
