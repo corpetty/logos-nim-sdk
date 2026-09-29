@@ -14,3 +14,4 @@ requires "nim >= 2.0.0"
 task test, "run the headless unit tests":
   exec "nim r --hints:off tests/tbytes.nim"
   exec "nim r --hints:off tests/tgen.nim"
+  exec "nim c --noLinking:on --hints:off --path:src -o:/dev/null tests/tffi.nim"
