@@ -110,6 +110,70 @@ proc callAsync*(p: PluginProxy, meth: string, callArgs: JsonNode,
   let argsStr = $callArgs
   lp_invoke_async(c, meth.cstring, argsStr.cstring, timeoutMs, cb, userData) == LP_OK
 
+# ── async calls into a Nim closure ─────────────────────────────────────────────
+# callAsync hands the ABI a cdecl callback and a raw pointer, which is what C wants
+# and what a Nim caller on an event loop (a Qt app's main thread, say) does not:
+# it wants a closure that sees the result decoded as callSync decodes it. The box
+# below carries the closure across the ABI. It is pinned (GC_ref) while the call is
+# in flight and released after its one delivery.
+
+type
+  CallDone* = proc (r: CallResult) {.closure.}
+    ## Receives the outcome of one async call. Runs exactly once.
+  CallBox = ref object
+    done: CallDone
+
+proc resultOf(ok: bool, raw: string): CallResult =
+  ## One delivered result, parsed as callSync parses it: on success the result JSON
+  ## (a non-JSON string kept as a string), on failure the error JSON.
+  var v: JsonNode = nil
+  try: v = parseJson(raw)
+  except CatchableError: v = %raw
+  if ok: CallResult(ok: true, value: v, raw: raw)
+  else: CallResult(ok: false, error: v, raw: raw)
+
+proc boxCallDone*(done: CallDone): pointer =
+  ## Pin `done` for one delivery and return the pointer the ABI carries back.
+  ## Exposed so the seam is testable without lp_*; callers use callAsyncThen.
+  let b = CallBox(done: done)
+  GC_ref(b)
+  cast[pointer](b)
+
+proc deliver(ud: pointer, r: CallResult) =
+  let b = cast[CallBox](ud)
+  try: b.done(r)
+  except CatchableError: discard   # never unwind into the ABI's frame
+  GC_unref(b)
+
+proc asyncResultCb*(ok: cint, json: cstring, userData: pointer) {.cdecl, gcsafe.} =
+  ## The LpResultCb callAsyncThen registers: decode, run the closure, release it.
+  {.cast(gcsafe).}:
+    deliver(userData, resultOf(ok != 0, (if json == nil: "" else: $json)))
+
+proc failCallDone*(userData: pointer, why: string) =
+  ## Deliver a failure for a call the ABI never accepted, so `done` still runs once.
+  deliver(userData, CallResult(ok: false, error: %*{"error": why}, raw: why))
+
+proc callAsyncThen*(p: PluginProxy, meth: string, callArgs: JsonNode,
+                    done: CallDone, timeoutMs: cint = 0): bool =
+  ## Asynchronous call whose result reaches `done`, decoded as callSync decodes it.
+  ## `done` runs exactly once:
+  ##   • where the ABI delivers results. For a client created on a Qt thread, over
+  ##     the QtRO transport, that is that thread, so a Qt app can set a property
+  ##     straight from `done` (muster exo-607 T4a);
+  ##   • or, when the call cannot start (no client, the ABI refused it), before this
+  ##     returns, with a failed CallResult, and the result is false.
+  let ud = boxCallDone(done)
+  let c = p.client()
+  if c == nil:
+    failCallDone(ud, "lp_client_create returned null")
+    return false
+  let argsStr = $callArgs
+  if lp_invoke_async(c, meth.cstring, argsStr.cstring, timeoutMs, asyncResultCb, ud) != LP_OK:
+    failCallDone(ud, "lp_invoke_async refused the call")
+    return false
+  true
+
 proc subscribe*(p: PluginProxy, eventName: string, cb: LpEventCb,
                 userData: pointer = nil): EventSubscription =
   ## Subscribe to `eventName` on the target. One subscription carries every

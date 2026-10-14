@@ -283,6 +283,13 @@ proc genClient*(contract: JsonNode, target = ""): string =
     result.add callLine
     result.add "  if not r.ok: raise newLogosCallError(\"" & name & "\", r.error)\n"
     result.add "  " & clientRetDecodeStrict(m["returnType"], name) & "\n\n"
+    # async twin: for a caller on an event loop (a GUI thread) that must not block.
+    # Lenient like the plain method; `done` runs once (see callAsyncThen).
+    let doneParam = ", done: proc (r: " & retT & ") {.closure.}"
+    result.add "proc " & name & "Async*(c: " & cn & sigStr & doneParam & "): bool =\n"
+    result.add "  c.proxy.callAsyncThen(\"" & name & "\", args(" & enc.join(", ") &
+               "), proc (r: CallResult) =\n"
+    result.add "    done(" & clientRetDecode(m["returnType"]) & "))\n\n"
 
 # ── DRIVER side: a Muster driver manifest from a contract (P-D5) ───────────────
 # The "module → driver" derivation. A Logos module method `verb(args) -> result`

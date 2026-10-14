@@ -19,7 +19,7 @@ surface stays generated as that contract layer moves.
     ffi.nim      lp_* C-ABI bindings            (rust src/ffi.rs)
     bytes.nim    {"_bytes":<b64url>} codec       (rust src/bytes.rs)   — pure, tested
     error.nim    LogosCallError (raising client) (rust src/error.rs)
-    plugin.nim   PluginProxy: shared-per-target client, sync/async call, subscribe
+    plugin.nim   PluginProxy: shared-per-target client, sync/async call (callAsyncThen: into a closure), subscribe
                                                  (rust src/plugin.rs)
     api.nim      protocol version + save_token; module context + emit + cstring seam
                                                  (rust src/api.rs)
@@ -50,6 +50,12 @@ decode the result into the Nim return type:
 - `<method>` — lenient: a typed zero-value on any failure, never raises.
 - `<method>OrRaise` — raising: a `LogosCallError` on a transport/method error or a
   result that doesn't decode to the contract's declared type.
+- `<method>Async(…, done)` — for a caller on an event loop that must not block (a
+  GUI thread): the result reaches the closure `done`, decoded leniently as the plain
+  method decodes it. `done` runs exactly once: where the ABI delivers results (for a
+  client created on a Qt thread over QtRO, that thread), or before the call returns,
+  with the zero-value and a `false` result, when the call cannot start. It rides
+  `PluginProxy.callAsyncThen`, which carries the closure across the C callback.
 
 This is the piece muster's own `tools/lidl_gen.nim` never had — muster called
 `delivery_module` through a hand-written proxy (until it migrated onto this SDK).

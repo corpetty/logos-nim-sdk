@@ -15,3 +15,5 @@ task test, "run the headless unit tests":
   exec "nim r --hints:off tests/tbytes.nim"
   exec "nim r --hints:off tests/tgen.nim"
   exec "nim c --noLinking:on --hints:off --path:src -o:/dev/null tests/tffi.nim"
+  exec "nim r --hints:off --path:src tests/tasync.nim"
+  exec "nim r --hints:off tests/tclient.nim"
