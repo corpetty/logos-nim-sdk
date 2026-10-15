@@ -84,6 +84,20 @@ suite "lidl-gen: consumer client":
     check "if not r.ok: raise newLogosCallError(\"increment\", r.error)" in c
     check "raise newLogosCallError(\"increment\", %\"result did not decode to int\")" in c
 
+  test "each method also gets an async twin (callback, for a caller on an event loop)":
+    check "proc incrementAsync*(c: CounterClient, amount: int, done: proc (r: int) {.closure.}): bool =" in c
+    check "proc echoAsync*(c: CounterClient, msg: string, done: proc (r: string) {.closure.}): bool =" in c
+    check "proc storeAsync*(c: CounterClient, blob: seq[byte], done: proc (r: bool) {.closure.}): bool =" in c
+
+  test "the async twin calls callAsyncThen and decodes leniently, as the plain method does":
+    check "c.proxy.callAsyncThen(\"increment\", args(%amount)" in c
+    check "done((if r.ok and r.value != nil and r.value.kind == JInt: r.value.getInt() else: 0))" in c
+
+  test "a method with no params gets an async twin with only the callback":
+    let c3 = genClient(%*{"name": "ping_module",
+      "methods": [{"name": "health", "params": [], "returnType": {"name": "tstr"}}]})
+    check "proc healthAsync*(c: PingClient, done: proc (r: string) {.closure.}): bool =" in c3
+
   test "bstr return would decode via b64urlDecode":
     let c2 = genClient(%*{"name": "blob_module",
       "methods": [{"name": "fetch", "params": [], "returnType": {"name": "bstr"}}]})
