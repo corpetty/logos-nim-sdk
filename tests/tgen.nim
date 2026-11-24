@@ -37,6 +37,9 @@ suite "lidl-gen: provider surface":
   test "accept_token delegates to saveToken (the regression guard)":
     check "saveToken(" in p
 
+  test "a handler's Defect is reported, never escapes the C ABI":
+    check "except Defect as e:" in p
+
   test "dispatch has a case arm per method + arg-count guard":
     check "of \"increment\":" in p
     check "of \"echo\":" in p
